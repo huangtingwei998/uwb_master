@@ -1,29 +1,44 @@
 #include "nlink_linktrack_nodeframe1.h"
+#include "cJSON.h"
+#include "s2j.h"
 #include <Windows.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <time.h>
-#include <conio.h>
 #include <mmsystem.h>
 #include <stdint.h>
 HANDLE hCom;
-
 #include <winsock2.h>
-#include <windows.h>
-#include <stdio.h>
 
+/*
+ * 引入socket的win版本
+ */
 #pragma comment(lib,"ws2_32.lib")
-#pragma pack(1)
-typedef struct
-{
-  uint8_t a;
-  uint8_t b;
-  uint32_t c;
-  double d;
-  uint8_t e;
-} pack_test_t;
+
 #pragma pack()
 
+
+typedef struct
+{
+    uint8_t count;
+    /*
+     * 这里没怎么优化，就是简单一个节点对应xyz三个变量
+     */
+    double node1[3];
+    double node2[3];
+} UWB;
+
+static cJSON *uwb_to_json(void* struct_obj) {
+    UWB *uwb = (UWB *)struct_obj;
+
+    /* 创建json对象 */
+    s2j_create_json_obj(json_uwb);
+    /* 序列化参数 */
+    s2j_json_set_basic_element(json_uwb, uwb, int, count);
+    s2j_json_set_array_element(json_uwb, uwb, double , node1, 3);
+    s2j_json_set_array_element(json_uwb, uwb, double , node2, 3);
+    return json_uwb;
+}
 
 int main()
 {
@@ -110,28 +125,65 @@ int main()
 
     DWORD wCount;//实际读取的字节数
     bool bReadStat;
+
     uint8_t output[68];
 
     /******************************************************************总程序****************************************************************************/
     clock_t start = clock();
     while (1) {
-        if ((clock() - start) == 100) {
+        /*
+         * 解释为什么是99，设定的UWB模块的频率是10hz，为了保证不发生粘包，所以快于0.1s，取99，这个暂时还不知道怎么解决。有的时候也会失效。
+         */
+        if ((clock() - start) == 99) {
             start = clock();
+            /*
+             * 串口读取数据
+             */
             bReadStat = ReadFile(hCom, output, sizeof(output), &wCount, NULL);
-
+            /*
+             * 如果解析成功，返回true。
+             */
             if (g_nlt_nodeframe1.UnpackData(output, 68))
             {
                 nlt_nodeframe1_result_t *result = &g_nlt_nodeframe1.result;
-                printf("LinkTrack NodeFrame1 data unpack successfully:\r\n");
-                printf("id:%d, system_time:%d, valid_node_count:%d\r\n", result->id,
-                       result->system_time, result->valid_node_count);
-                for (int i = 0; i < result->valid_node_count; ++i)
-                {
-                    nlt_nodeframe1_node_t *node = result->nodes[i];
-                    printf("role:%d, id:%d, x:%f, y:%f\r\n", node->role, node->id,
-                           node->pos_3d[0], node->pos_3d[1]);
-                }
+                /*
+                 * 拿出数据
+                 */
+                uint8_t count = result->valid_node_count;
+                double x0 = (double)result->nodes[0]->pos_3d[0];
+                double y0 = (double)result->nodes[0]->pos_3d[1];
+                double z0 = (double)result->nodes[0]->pos_3d[2];
+
+                printf("x:%f, y:%f\r\n",
+                       result->nodes[0]->pos_3d[0], result->nodes[0]->pos_3d[0]);
+
+                double x1 = (double)result->nodes[1]->pos_3d[0];
+                double y1 = (double)result->nodes[1]->pos_3d[1];
+                double z1 = (double)result->nodes[1]->pos_3d[2];
+
+                printf("x:%f, y:%f\r\n",
+                       result->nodes[1]->pos_3d[0], result->nodes[1]->pos_3d[0]);
+
+                UWB uwb = {
+                        .count = count,
+                        .node1 = {x0,y0,z0},
+                        .node2 = {x1,y1,z1},
+                };
+            /*
+             * 转成json
+             */
+            cJSON *json_uwb = uwb_to_json(&uwb);
+            char *json_uwb_string = cJSON_PrintUnformatted(json_uwb);
+            /*
+             * socket发送数据
+             */
+            send(sClient, json_uwb_string, strlen(json_uwb_string), 0);
+
+
             }
+            /*
+             * 每次读完，就清空缓冲区，防止粘包和拆包。
+             */
             PurgeComm(hCom, PURGE_TXCLEAR | PURGE_RXCLEAR); //清空缓冲区
         }
 
